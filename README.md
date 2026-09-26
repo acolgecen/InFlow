@@ -14,6 +14,7 @@ A browser-based flowchart builder powered by [Mermaid](https://mermaid.js.org/).
 
 ### Preview
 - Real-time diagram rendering via Mermaid 10
+- Polished flowchart defaults with compact spacing, rounded cards, orthogonal connectors, pill labels, and stronger typography
 - **Zoom in / Zoom out** controls (+/- buttons or mouse wheel)
 - **Fit** button to auto-scale the diagram to the available viewport
 - **Drag to pan** — click and drag anywhere in the preview to navigate
@@ -32,6 +33,7 @@ A browser-based flowchart builder powered by [Mermaid](https://mermaid.js.org/).
   - Dark: Dark, Forest, Midnight, Slate, Mocha
 - **Flow Direction** — TD (top-down), LR (left-right), BT (bottom-top), RL (right-left)
 - **Custom CSS** — inject arbitrary SVG styles into the rendered diagram
+- Custom CSS applies as it is entered; selecting a theme afterward reasserts that theme's colors while retaining non-color CSS
 
 ### Templates
 Six ready-made starting points:
@@ -46,9 +48,9 @@ Six ready-made starting points:
 
 ### Export
 - **SVG** — clean, scalable vector file
-- **PNG** — high-resolution raster (transparent background)
-- **PDF** — print-ready document
-- Resolution scale options: 2x, 3x, 4x (default), 6x, 8x
+- **PNG** — high-resolution raster with the selected theme background
+- **PDF** — the styled SVG is embedded directly as vector artwork
+- Resolution scale options for PNG: 2x, 3x, 4x (default), 6x, 8x
 
 ## Usage
 
@@ -56,6 +58,12 @@ Open `index.html` directly in any modern browser — no build step, no server ne
 
 ```
 open index.html
+```
+
+Run the export/theme regression checks with:
+
+```bash
+node --test tests/export-theme.test.mjs
 ```
 
 ### Supported Node Shapes
@@ -91,6 +99,7 @@ All loaded via CDN — no npm install required.
 |---|---|---|
 | [Mermaid](https://mermaid.js.org/) | 10.9.1 | Diagram rendering |
 | [jsPDF](https://github.com/parallax/jsPDF) | 2.5.1 | PDF export |
+| [svg2pdf.js](https://github.com/yWorks/svg2pdf.js) | 2.8.1 | Vector SVG-to-PDF conversion |
 
 ## Browser Support
 

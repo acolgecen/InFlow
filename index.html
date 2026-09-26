@@ -6,6 +6,7 @@
 <title>InFlow</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/svg2pdf.js@2.8.1/dist/svg2pdf.umd.min.js"></script>
 <style>
   :root {
     --bg: #0f1117;
@@ -475,7 +476,7 @@
       </div>
       <div class="props-section">
         <h3>Custom CSS</h3>
-        <textarea id="customCss" style="width:100%;height:100px;resize:vertical;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px;font-family:monospace;font-size:12px;outline:none;" placeholder="Add custom styles for your diagram SVG..." onchange="renderDiagram()"></textarea>
+        <textarea id="customCss" style="width:100%;height:100px;resize:vertical;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px;font-family:monospace;font-size:12px;outline:none;" placeholder="Add custom styles for your diagram SVG..."></textarea>
       </div>
     </div>
 
@@ -519,7 +520,7 @@
   <div class="modal">
     <h2>Export Diagram</h2>
     <div class="export-scale">
-      <label>Resolution Scale (for PNG &amp; PDF raster)</label>
+      <label>Resolution Scale (PNG only; SVG and PDF stay vector)</label>
       <select id="exportScale">
         <option value="2">2x — High Quality (default)</option>
         <option value="3">3x — Very High</option>
@@ -578,6 +579,11 @@ let selectedNode = null;
 let nodeStyles = {};       // nodeId -> {fill, stroke, color}
 let renderCounter = 0;
 let debounceTimer = null;
+let customCssDebounceTimer = null;
+let liveRenderVersion = 0;
+let mermaidRenderQueue = Promise.resolve();
+let resolvedThemeColors = {};
+let themeColorsOverrideCustomCss = false;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Init
@@ -591,6 +597,7 @@ mermaid.initialize({
 });
 
 const editor = document.getElementById('codeEditor');
+const customCssEditor = document.getElementById('customCss');
 const preview = document.getElementById('mermaidPreview');
 const errorEl = document.getElementById('previewError');
 
@@ -598,6 +605,14 @@ const errorEl = document.getElementById('previewError');
 editor.addEventListener('input', () => {
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(renderDiagram, 500);
+});
+
+// Pasting or editing CSS makes it the active style layer immediately. Choosing
+// a theme later deliberately reasserts that theme's colors.
+customCssEditor.addEventListener('input', () => {
+  themeColorsOverrideCustomCss = false;
+  clearTimeout(customCssDebounceTimer);
+  customCssDebounceTimer = setTimeout(renderDiagram, 100);
 });
 
 // Tab key support in editor
@@ -615,6 +630,7 @@ editor.addEventListener('keydown', (e) => {
 // Render
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 async function renderDiagram() {
+  const renderVersion = ++liveRenderVersion;
   const code = editor.value.trim();
   if (!code) {
     preview.innerHTML = '<p style="color:var(--text-dim);font-size:14px;">Enter Mermaid code to see your diagram</p>';
@@ -627,20 +643,13 @@ async function renderDiagram() {
 
   const id = 'mermaid-' + (++renderCounter);
   try {
-    const { svg } = await mermaid.render(id, finalCode);
+    const { svg } = await renderMermaid(buildMermaidConfig(currentTheme, true), id, finalCode, currentTheme);
+    if (renderVersion !== liveRenderVersion) return;
     preview.innerHTML = svg;
     errorEl.classList.remove('show');
 
-    // Apply custom CSS if any
-    const customCss = document.getElementById('customCss').value.trim();
-    if (customCss) {
-      const svgEl = preview.querySelector('svg');
-      if (svgEl) {
-        const styleEl = document.createElementNS('http://www.w3.org/2000/svg', 'style');
-        styleEl.textContent = customCss;
-        svgEl.insertBefore(styleEl, svgEl.firstChild);
-      }
-    }
+    // Keep the exact same CSS cascade in preview, SVG, PNG, and PDF.
+    applySvgStyleLayers(preview.querySelector('svg'));
 
     // Apply zoom + pan
     applyTransform();
@@ -657,6 +666,32 @@ async function renderDiagram() {
     const failedEl = document.getElementById(id);
     if (failedEl) failedEl.remove();
   }
+}
+
+// Mermaid configuration is global. Serializing renders prevents a live preview
+// and an export from changing each other's theme halfway through an async render.
+function renderMermaid(config, id, code, themeKey) {
+  const task = mermaidRenderQueue.then(() => {
+    mermaid.initialize(config);
+    const variables = mermaid.mermaidAPI && mermaid.mermaidAPI.getConfig
+      ? mermaid.mermaidAPI.getConfig().themeVariables
+      : null;
+    if (variables && themeKey) {
+      const fallback = themeDefinitions[themeKey]?.colors || themeDefinitions.default.colors;
+      resolvedThemeColors[themeKey] = {
+        primary: variables.primaryColor || fallback.primary,
+        text: variables.primaryTextColor || fallback.text,
+        border: variables.primaryBorderColor || fallback.border,
+        line: variables.lineColor || fallback.line,
+        background: variables.background || fallback.background,
+        edgeLabel: variables.edgeLabelBackground || fallback.edgeLabel,
+        cluster: variables.clusterBkg || fallback.cluster
+      };
+    }
+    return mermaid.render(id, code);
+  });
+  mermaidRenderQueue = task.catch(() => {});
+  return task;
 }
 
 function injectStyles(code) {
@@ -953,10 +988,17 @@ function updateConnection(index, newType) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 var themeDefinitions = {
   // Light themes
-  'default': { theme: 'default' },
-  'neutral': { theme: 'neutral' },
+  'default': {
+    theme: 'default',
+    colors: { primary: '#ECECFF', text: '#131300', border: '#9370DB', line: '#333333', background: '#ffffff', edgeLabel: '#e8e8e8', cluster: '#ffffde' }
+  },
+  'neutral': {
+    theme: 'neutral',
+    colors: { primary: '#eeeeee', text: '#333333', border: '#999999', line: '#666666', background: '#ffffff', edgeLabel: '#ffffff', cluster: '#f4f4f4' }
+  },
   'ocean': {
     theme: 'base',
+    colors: { primary: '#dbeafe', text: '#1e3a5f', border: '#3b82f6', line: '#3b82f6', background: '#eff6ff', edgeLabel: '#dbeafe', cluster: '#bfdbfe' },
     themeVariables: {
       primaryColor: '#dbeafe', primaryTextColor: '#1e3a5f',
       primaryBorderColor: '#3b82f6', lineColor: '#3b82f6',
@@ -966,6 +1008,7 @@ var themeDefinitions = {
   },
   'rose': {
     theme: 'base',
+    colors: { primary: '#fce7f3', text: '#831843', border: '#ec4899', line: '#ec4899', background: '#fff1f5', edgeLabel: '#fce7f3', cluster: '#fbcfe8' },
     themeVariables: {
       primaryColor: '#fce7f3', primaryTextColor: '#831843',
       primaryBorderColor: '#ec4899', lineColor: '#ec4899',
@@ -975,6 +1018,7 @@ var themeDefinitions = {
   },
   'sage': {
     theme: 'base',
+    colors: { primary: '#d1fae5', text: '#064e3b', border: '#10b981', line: '#10b981', background: '#ecfdf5', edgeLabel: '#d1fae5', cluster: '#a7f3d0' },
     themeVariables: {
       primaryColor: '#d1fae5', primaryTextColor: '#064e3b',
       primaryBorderColor: '#10b981', lineColor: '#10b981',
@@ -983,10 +1027,17 @@ var themeDefinitions = {
     }
   },
   // Dark themes
-  'dark': { theme: 'dark' },
-  'forest': { theme: 'forest' },
+  'dark': {
+    theme: 'dark',
+    colors: { primary: '#1f2020', text: '#cccccc', border: '#81B1DB', line: '#cccccc', background: '#333333', edgeLabel: '#333333', cluster: '#555555' }
+  },
+  'forest': {
+    theme: 'forest',
+    colors: { primary: '#cde498', text: '#000000', border: '#13540c', line: '#0b0b0b', background: '#ffffff', edgeLabel: '#e8e8e8', cluster: '#cdffb2' }
+  },
   'midnight': {
     theme: 'base',
+    colors: { primary: '#1e1b4b', text: '#e0e7ff', border: '#6366f1', line: '#818cf8', background: '#0f0e1a', edgeLabel: '#1e1b4b', cluster: '#312e81' },
     themeVariables: {
       primaryColor: '#1e1b4b', primaryTextColor: '#e0e7ff',
       primaryBorderColor: '#6366f1', lineColor: '#818cf8',
@@ -996,6 +1047,7 @@ var themeDefinitions = {
   },
   'slate': {
     theme: 'base',
+    colors: { primary: '#334155', text: '#e2e8f0', border: '#64748b', line: '#94a3b8', background: '#0f172a', edgeLabel: '#334155', cluster: '#1e293b' },
     themeVariables: {
       primaryColor: '#334155', primaryTextColor: '#e2e8f0',
       primaryBorderColor: '#64748b', lineColor: '#94a3b8',
@@ -1005,6 +1057,7 @@ var themeDefinitions = {
   },
   'mocha': {
     theme: 'base',
+    colors: { primary: '#3c2415', text: '#fdf4eb', border: '#a0522d', line: '#cd853f', background: '#1c0f05', edgeLabel: '#3c2415', cluster: '#2c1a0e' },
     themeVariables: {
       primaryColor: '#3c2415', primaryTextColor: '#fdf4eb',
       primaryBorderColor: '#a0522d', lineColor: '#cd853f',
@@ -1019,20 +1072,283 @@ var themeDefinitions = {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 function buildMermaidConfig(themeKey, htmlLabels) {
   const def = themeDefinitions[themeKey] || { theme: themeKey };
+  const fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif';
   const cfg = {
     startOnLoad: false,
     theme: def.theme || themeKey,
     securityLevel: 'loose',
-    flowchart: { curve: 'basis', htmlLabels: htmlLabels !== false },
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+    flowchart: {
+      curve: 'stepAfter',
+      htmlLabels: htmlLabels !== false,
+      nodeSpacing: 32,
+      rankSpacing: 56,
+      padding: 16
+    },
+    fontFamily
   };
-  if (def.themeVariables) cfg.themeVariables = def.themeVariables;
+  cfg.themeVariables = {
+    ...(def.themeVariables || {}),
+    fontFamily,
+    fontSize: '16px'
+  };
   return cfg;
+}
+
+function getThemeColors(themeKey = currentTheme) {
+  const def = themeDefinitions[themeKey] || themeDefinitions.default;
+  return resolvedThemeColors[themeKey] || def.colors || themeDefinitions.default.colors;
+}
+
+function buildThemeColorOverrideCss(themeKey = currentTheme) {
+  const c = getThemeColors(themeKey);
+  return `
+    .node rect, .node circle, .node ellipse, .node polygon, .node path,
+    .node .label-container {
+      fill: ${c.primary} !important;
+      stroke: ${c.border} !important;
+    }
+    .nodeLabel, .node text, .node tspan, .node span, .node foreignObject,
+    .cluster-label, .cluster-label text, .cluster-label span {
+      color: ${c.text} !important;
+      fill: ${c.text} !important;
+    }
+    .edgePath path, path.flowchart-link {
+      stroke: ${c.line} !important;
+    }
+    marker path, .arrowMarkerPath {
+      stroke: ${c.line} !important;
+    }
+    marker[id*="point"] path, marker[id*="Point"] path {
+      fill: none !important;
+    }
+    .edgeLabel, .edgeLabel span, .edgeLabel text {
+      color: ${c.text} !important;
+      fill: ${c.text} !important;
+      background-color: ${c.edgeLabel} !important;
+    }
+    .edgeLabel rect, .labelBkg {
+      fill: ${c.edgeLabel} !important;
+    }
+    .cluster rect {
+      fill: ${c.cluster} !important;
+      stroke: ${c.border} !important;
+    }
+  `;
+}
+
+function buildPolishedDiagramCss(themeKey = currentTheme) {
+  const c = getThemeColors(themeKey);
+  return `
+    .node rect, .node circle, .node ellipse, .node polygon, .node path {
+      stroke-width: 1.5px;
+      stroke-linejoin: round;
+    }
+    .node rect {
+      rx: 12px;
+      ry: 12px;
+    }
+    .nodeLabel, .node text, .node tspan, .node span,
+    .edgeLabel, .edgeLabel text, .edgeLabel tspan, .edgeLabel span {
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      text-rendering: geometricPrecision;
+    }
+    .edgePath path, path.flowchart-link {
+      stroke-width: 1.5px;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    marker path, .arrowMarkerPath {
+      stroke-width: 1px;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    marker[id*="point"] path, marker[id*="Point"] path {
+      fill: none;
+    }
+    .edgeLabel foreignObject {
+      overflow: visible;
+    }
+    .edgeLabel span, .edgeLabel p {
+      display: inline-block;
+      padding: 3px 8px;
+      border: 1px solid ${c.border};
+      border-radius: 999px;
+      background: ${c.edgeLabel};
+      color: ${c.text};
+      line-height: 1.2;
+    }
+    .edgeLabel rect, .labelBkg {
+      fill: ${c.edgeLabel};
+      stroke: ${c.border};
+      stroke-width: 1px;
+      rx: 999px;
+      ry: 999px;
+    }
+  `;
+}
+
+function buildNodeEditorOverrideCss() {
+  const escapeId = value => window.CSS && CSS.escape
+    ? CSS.escape(value)
+    : value.replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+
+  return Object.entries(nodeStyles).map(([nodeId, styles]) => {
+    const selector = `.node[id^="flowchart-${escapeId(nodeId)}-"]`;
+    const shapeRules = [];
+    const textRules = [];
+    if (styles.fill) shapeRules.push(`fill:${styles.fill} !important`);
+    if (styles.stroke) shapeRules.push(`stroke:${styles.stroke} !important`);
+    if (styles.color) {
+      textRules.push(`color:${styles.color} !important`);
+      textRules.push(`fill:${styles.color} !important`);
+    }
+
+    return `
+      ${selector} rect, ${selector} circle, ${selector} ellipse,
+      ${selector} polygon, ${selector} path, ${selector} .label-container {
+        ${shapeRules.join(';')}
+      }
+      ${selector} .nodeLabel, ${selector} text, ${selector} tspan,
+      ${selector} span, ${selector} foreignObject {
+        ${textRules.join(';')}
+      }
+    `;
+  }).join('\n');
+}
+
+function appendSvgStyle(svgEl, layer, cssText) {
+  if (!svgEl || !cssText.trim()) return;
+  const styleEl = svgEl.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'style');
+  styleEl.setAttribute('type', 'text/css');
+  styleEl.setAttribute('data-inflow-style', layer);
+  styleEl.textContent = cssText;
+  svgEl.appendChild(styleEl);
+}
+
+function setImportantSvgStyles(svgEl, selector, declarations) {
+  svgEl.querySelectorAll(selector).forEach(el => {
+    for (const [property, value] of Object.entries(declarations)) {
+      if (el.style && typeof el.style.setProperty === 'function') {
+        el.style.setProperty(property, value, 'important');
+      } else {
+        const current = el.getAttribute('style') || '';
+        el.setAttribute('style', `${current};${property}:${value} !important`);
+      }
+    }
+  });
+}
+
+function applyThemeColorsInline(svgEl) {
+  const c = getThemeColors();
+  setImportantSvgStyles(svgEl,
+    '.node rect, .node circle, .node ellipse, .node polygon, .node path, .node .label-container',
+    { fill: c.primary, stroke: c.border }
+  );
+  setImportantSvgStyles(svgEl,
+    '.nodeLabel, .node text, .node tspan, .node span, .node foreignObject, .cluster-label, .cluster-label text, .cluster-label span',
+    { color: c.text, fill: c.text }
+  );
+  setImportantSvgStyles(svgEl, '.edgePath path, path.flowchart-link', { stroke: c.line });
+  setImportantSvgStyles(svgEl, 'marker path, .arrowMarkerPath', { stroke: c.line });
+  setImportantSvgStyles(svgEl, 'marker[id*="point"] path, marker[id*="Point"] path', { fill: 'none' });
+  setImportantSvgStyles(svgEl, '.edgeLabel, .edgeLabel span, .edgeLabel text', {
+    color: c.text,
+    fill: c.text,
+    'background-color': c.edgeLabel
+  });
+  setImportantSvgStyles(svgEl, '.edgeLabel rect, .labelBkg', { fill: c.edgeLabel });
+  setImportantSvgStyles(svgEl, '.cluster rect', { fill: c.cluster, stroke: c.border });
+}
+
+function applyNodeEditorStylesInline(svgEl) {
+  const escapeId = value => window.CSS && CSS.escape
+    ? CSS.escape(value)
+    : value.replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+
+  for (const [nodeId, styles] of Object.entries(nodeStyles)) {
+    const selector = `.node[id^="flowchart-${escapeId(nodeId)}-"]`;
+    const shapeStyles = {};
+    const textStyles = {};
+    if (styles.fill) shapeStyles.fill = styles.fill;
+    if (styles.stroke) shapeStyles.stroke = styles.stroke;
+    if (styles.color) {
+      textStyles.color = styles.color;
+      textStyles.fill = styles.color;
+    }
+    setImportantSvgStyles(svgEl,
+      `${selector} rect, ${selector} circle, ${selector} ellipse, ${selector} polygon, ${selector} path, ${selector} .label-container`,
+      shapeStyles
+    );
+    setImportantSvgStyles(svgEl,
+      `${selector} .nodeLabel, ${selector} text, ${selector} tspan, ${selector} span, ${selector} foreignObject`,
+      textStyles
+    );
+  }
+}
+
+function applyPolishedSvgGeometry(svgEl) {
+  svgEl.querySelectorAll('marker[id*="point"] path, marker[id*="Point"] path').forEach(path => {
+    path.setAttribute('d', 'M 1 1 L 9 5 L 1 9');
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke-linecap', 'round');
+    path.setAttribute('stroke-linejoin', 'round');
+  });
+
+  svgEl.querySelectorAll('.node rect').forEach(rect => {
+    const height = parseFloat(rect.getAttribute('height')) || 36;
+    const existingRadius = parseFloat(rect.getAttribute('rx')) || 0;
+    const radius = Math.max(existingRadius, Math.min(12, height / 3));
+    rect.setAttribute('rx', radius);
+    rect.setAttribute('ry', radius);
+  });
+
+  // Text-label exports use SVG background rectangles. Expand those rectangles
+  // into pills while leaving the label centered in its original position.
+  svgEl.querySelectorAll('.edgeLabel rect, .edgeLabel .labelBkg').forEach(rect => {
+    if (rect.hasAttribute('data-inflow-polished')) return;
+    const x = parseFloat(rect.getAttribute('x'));
+    const y = parseFloat(rect.getAttribute('y'));
+    const width = parseFloat(rect.getAttribute('width'));
+    const height = parseFloat(rect.getAttribute('height'));
+    if ([x, y, width, height].every(Number.isFinite)) {
+      rect.setAttribute('x', x - 7);
+      rect.setAttribute('y', y - 4);
+      rect.setAttribute('width', width + 14);
+      rect.setAttribute('height', height + 8);
+    }
+    rect.setAttribute('rx', 999);
+    rect.setAttribute('ry', 999);
+    rect.setAttribute('data-inflow-polished', 'true');
+  });
+}
+
+function applySvgStyleLayers(svgEl) {
+  if (!svgEl) return;
+  svgEl.querySelectorAll('[data-inflow-style]').forEach(el => el.remove());
+
+  // The structural polish layer establishes compact, legible defaults. User
+  // CSS follows it and can still override any of these presentation choices.
+  appendSvgStyle(svgEl, 'polished', buildPolishedDiagramCss());
+  applyPolishedSvgGeometry(svgEl);
+
+  // Freshly edited CSS wins immediately. Selecting a theme afterward locks its
+  // colors over custom color rules while preserving non-color CSS properties.
+  const customCss = customCssEditor.value.trim();
+  appendSvgStyle(svgEl, 'custom', customCss);
+  if (themeColorsOverrideCustomCss) {
+    appendSvgStyle(svgEl, 'theme-colors', buildThemeColorOverrideCss());
+    applyThemeColorsInline(svgEl);
+  }
+
+  // Explicit node edits made in the UI remain the final, most specific layer.
+  appendSvgStyle(svgEl, 'node-editor', buildNodeEditorOverrideCss());
+  applyNodeEditorStylesInline(svgEl);
 }
 
 function setTheme(themeKey) {
   currentTheme = themeKey;
-  mermaid.initialize(buildMermaidConfig(themeKey));
+  themeColorsOverrideCustomCss = true;
   document.querySelectorAll('.theme-chip').forEach(c => c.classList.toggle('active', c.dataset.theme === themeKey));
   renderDiagram();
 }
@@ -1284,11 +1600,12 @@ document.getElementById('exportModal').addEventListener('click', (e) => {
 // ── High-quality export pipeline ──
 // Strategy:
 //   1. Re-render mermaid with htmlLabels:false (no <foreignObject> = canvas-safe)
-//   2. Insert SVG into DOM offscreen to get true pixel bounding box via getBBox/getBoundingClientRect
-//   3. Rebuild a self-contained SVG with explicit pixel viewBox, embedded fonts & white bg
-//   4. For PNG: render to an oversized canvas at the requested DPI scale
-//   5. For PDF: use mm-based A-series page with the image fitted inside margins
-//   6. For SVG: deliver the clean self-contained SVG directly
+//   2. Apply the same custom CSS and theme override layers used by the preview
+//   3. Insert SVG into DOM offscreen to get its true pixel bounding box
+//   4. Rebuild a self-contained SVG with an explicit viewBox, fonts, and theme bg
+//   5. For PNG: render to an oversized canvas at the requested DPI scale
+//   6. For PDF: embed that SVG directly as vector artwork (never via PNG)
+//   7. For SVG: deliver the same self-contained SVG directly
 
 var EXPORT_PADDING = 40; // px padding around diagram content
 
@@ -1299,28 +1616,36 @@ async function getExportSvg() {
   // ── 1. Re-render with htmlLabels OFF (no foreignObject) ──
   const exportConfig = buildMermaidConfig(currentTheme, false);
   exportConfig.flowchart.useMaxWidth = false;
-  mermaid.initialize(exportConfig);
 
   const exportId = 'mermaid-export-' + (++renderCounter);
   let svgMarkup;
   try {
     const finalCode = injectStyles(code);
-    const result = await mermaid.render(exportId, finalCode);
+    const result = await renderMermaid(exportConfig, exportId, finalCode, currentTheme);
     svgMarkup = result.svg;
   } catch (err) {
     console.error('Export render failed:', err);
-    restoreLiveConfig();
     return null;
   }
 
-  // ── 2. Measure the real bounding box by inserting into DOM ──
+  // ── 2. Create the styled, self-contained SVG used by every export ──
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(svgMarkup, 'image/svg+xml');
+  const rootSvg = doc.querySelector('svg');
+  if (!rootSvg || doc.querySelector('parsererror')) return null;
+  applySvgStyleLayers(rootSvg);
+
+  const serializer = new XMLSerializer();
+  svgMarkup = serializer.serializeToString(rootSvg);
+
+  // ── 3. Measure the real bounding box by inserting into DOM ──
   const measurer = document.createElement('div');
   measurer.style.cssText = 'position:fixed;top:-99999px;left:-99999px;visibility:hidden;pointer-events:none;';
   measurer.innerHTML = svgMarkup;
   document.body.appendChild(measurer);
 
   const svgEl = measurer.querySelector('svg');
-  if (!svgEl) { document.body.removeChild(measurer); restoreLiveConfig(); return null; }
+  if (!svgEl) { document.body.removeChild(measurer); return null; }
 
   // Remove any max-width / width:100% that mermaid adds — we need intrinsic size
   svgEl.style.maxWidth = 'none';
@@ -1347,18 +1672,12 @@ async function getExportSvg() {
 
   document.body.removeChild(measurer);
 
-  // ── 3. Build a clean self-contained SVG ──
+  // ── 4. Finish the clean self-contained SVG ──
   const pad = EXPORT_PADDING;
   const contentW = bbox.width;
   const contentH = bbox.height;
   const totalW = contentW + pad * 2;
   const totalH = contentH + pad * 2;
-
-  // Parse original SVG to clone it
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(svgMarkup, 'image/svg+xml');
-  const rootSvg = doc.querySelector('svg');
-  if (!rootSvg) { restoreLiveConfig(); return null; }
 
   // Set tight viewBox with padding, and explicit width/height in px
   rootSvg.setAttribute('viewBox', `${bbox.x - pad} ${bbox.y - pad} ${totalW} ${totalH}`);
@@ -1368,13 +1687,15 @@ async function getExportSvg() {
   rootSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
   rootSvg.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
 
-  // Insert white background rect
+  // Use the selected theme background in every exported format.
+  const themeColors = getThemeColors();
   const bgRect = doc.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  bgRect.setAttribute('class', 'inflow-export-background');
   bgRect.setAttribute('x', bbox.x - pad);
   bgRect.setAttribute('y', bbox.y - pad);
   bgRect.setAttribute('width', totalW);
   bgRect.setAttribute('height', totalH);
-  bgRect.setAttribute('fill', '#ffffff');
+  bgRect.setAttribute('fill', themeColors.background);
   rootSvg.insertBefore(bgRect, rootSvg.firstChild);
 
   // Embed font declaration so text renders identically everywhere
@@ -1386,15 +1707,9 @@ async function getExportSvg() {
   `;
   rootSvg.insertBefore(styleEl, rootSvg.firstChild);
 
-  const serializer = new XMLSerializer();
   const svgString = '<?xml version="1.0" encoding="UTF-8"?>\n' + serializer.serializeToString(rootSvg);
 
-  restoreLiveConfig();
   return { svgString, width: totalW, height: totalH };
-}
-
-function restoreLiveConfig() {
-  mermaid.initialize(buildMermaidConfig(currentTheme));
 }
 
 // Render SVG string to a high-res canvas, returns a Promise<Canvas>
@@ -1428,6 +1743,101 @@ function svgToCanvas(svgString, width, height, scale) {
   });
 }
 
+// svg2pdf can render Mermaid marker arrowheads while omitting their linked
+// connector paths. For PDF only, replace marker references with ordinary SVG
+// geometry so the line and arrowhead are handled by the same vector pipeline.
+function normalizePdfConnectors(svgEl) {
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const connectors = svgEl.querySelectorAll('.edgePath path, path.flowchart-link');
+
+  connectors.forEach(path => {
+    const computed = window.getComputedStyle(path);
+    const stroke = computed.stroke && computed.stroke !== 'none'
+      ? computed.stroke
+      : (path.getAttribute('stroke') || getThemeColors().line);
+    const strokeWidth = Math.max(1, parseFloat(computed.strokeWidth) || 1.5);
+
+    // Copy computed CSS into presentation attributes understood consistently
+    // by both the browser SVG renderer and svg2pdf.
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke', stroke);
+    path.setAttribute('stroke-width', strokeWidth);
+    path.setAttribute('stroke-linecap', computed.strokeLinecap || 'round');
+    path.setAttribute('stroke-linejoin', computed.strokeLinejoin || 'round');
+    const pdfPathStyles = [
+      'fill:none',
+      `stroke:${stroke}`,
+      `stroke-width:${strokeWidth}`,
+      `stroke-linecap:${computed.strokeLinecap || 'round'}`,
+      `stroke-linejoin:${computed.strokeLinejoin || 'round'}`,
+      `stroke-opacity:${computed.strokeOpacity || '1'}`,
+      `opacity:${computed.opacity || '1'}`
+    ];
+    if (computed.strokeDasharray && computed.strokeDasharray !== 'none') {
+      path.setAttribute('stroke-dasharray', computed.strokeDasharray);
+      path.setAttribute('stroke-dashoffset', computed.strokeDashoffset || '0');
+      pdfPathStyles.push(`stroke-dasharray:${computed.strokeDasharray}`);
+      pdfPathStyles.push(`stroke-dashoffset:${computed.strokeDashoffset || '0'}`);
+    }
+    // Avoid converter-specific handling of CSS !important by reducing each
+    // connector to a simple, explicit inline vector style.
+    path.setAttribute('style', pdfPathStyles.join(';'));
+
+    const markerStart = path.getAttribute('marker-start') || computed.markerStart;
+    const markerEnd = path.getAttribute('marker-end') || computed.markerEnd;
+    let length;
+    try {
+      length = path.getTotalLength();
+    } catch (_) {
+      return;
+    }
+    if (!Number.isFinite(length) || length <= 0) return;
+
+    const addArrowhead = atEnd => {
+      const tipDistance = atEnd ? length : 0;
+      const innerDistance = atEnd ? Math.max(0, length - 2) : Math.min(length, 2);
+      const tip = path.getPointAtLength(tipDistance);
+      const inner = path.getPointAtLength(innerDistance);
+      let dx = tip.x - inner.x;
+      let dy = tip.y - inner.y;
+      const magnitude = Math.hypot(dx, dy) || 1;
+      const ux = dx / magnitude;
+      const uy = dy / magnitude;
+      const arrowLength = Math.max(8, strokeWidth * 4.5);
+      const halfWidth = Math.max(4, strokeWidth * 2.25);
+      const baseX = tip.x - ux * arrowLength;
+      const baseY = tip.y - uy * arrowLength;
+      const px = -uy * halfWidth;
+      const py = ux * halfWidth;
+
+      const arrow = document.createElementNS(SVG_NS, 'polyline');
+      arrow.setAttribute('class', 'inflow-pdf-arrowhead');
+      arrow.setAttribute('points', [
+        `${baseX + px},${baseY + py}`,
+        `${tip.x},${tip.y}`,
+        `${baseX - px},${baseY - py}`
+      ].join(' '));
+      arrow.setAttribute('fill', 'none');
+      arrow.setAttribute('stroke', stroke);
+      arrow.setAttribute('stroke-width', strokeWidth);
+      arrow.setAttribute('stroke-linecap', 'round');
+      arrow.setAttribute('stroke-linejoin', 'round');
+      if (path.hasAttribute('transform')) {
+        arrow.setAttribute('transform', path.getAttribute('transform'));
+      }
+      path.parentNode.appendChild(arrow);
+    };
+
+    if (markerStart && markerStart !== 'none') addArrowhead(false);
+    if (markerEnd && markerEnd !== 'none') addArrowhead(true);
+
+    path.removeAttribute('marker-start');
+    path.removeAttribute('marker-end');
+    path.style.removeProperty('marker-start');
+    path.style.removeProperty('marker-end');
+  });
+}
+
 async function exportAs(format) {
   closeExportModal();
   showToast('Preparing high-quality export...');
@@ -1447,13 +1857,11 @@ async function exportAs(format) {
     return;
   }
 
-  const scale = parseInt(document.getElementById('exportScale').value) || 2;
-
   try {
-    const canvas = await svgToCanvas(svgString, width, height, scale);
-
     // ── PNG ──
     if (format === 'png') {
+      const scale = parseInt(document.getElementById('exportScale').value) || 2;
+      const canvas = await svgToCanvas(svgString, width, height, scale);
       canvas.toBlob((blob) => {
         if (!blob) { showToast('PNG export failed'); return; }
         const url = URL.createObjectURL(blob);
@@ -1473,24 +1881,46 @@ async function exportAs(format) {
     // ── PDF ──
     if (format === 'pdf') {
       const { jsPDF } = window.jspdf;
-      // Use mm for professional print output
-      // Convert diagram px to mm at 96 DPI: 1 px = 0.2646 mm
+      if (!jsPDF || typeof jsPDF.API.svg !== 'function') {
+        throw new Error('Vector PDF support did not load. Please refresh and try again.');
+      }
+
+      // Build a page around the SVG at its natural 96-DPI dimensions.
       const PX_TO_MM = 25.4 / 96;
-      const imgWidthMM = width * scale * PX_TO_MM;
-      const imgHeightMM = height * scale * PX_TO_MM;
-      // Choose page size that fits — at least A4 but expand if needed
+      const svgWidthMM = width * PX_TO_MM;
+      const svgHeightMM = height * PX_TO_MM;
       const marginMM = 10;
-      const pageW = Math.max(210, imgWidthMM + marginMM * 2);
-      const pageH = Math.max(297, imgHeightMM + marginMM * 2);
+      const pageW = Math.max(210, svgWidthMM + marginMM * 2);
+      const pageH = Math.max(297, svgHeightMM + marginMM * 2);
       const orientation = pageW > pageH ? 'landscape' : 'portrait';
       const pdf = new jsPDF({ orientation, unit: 'mm', format: [pageW, pageH] });
-      // Center on page
-      const offX = (pageW - imgWidthMM) / 2;
-      const offY = (pageH - imgHeightMM) / 2;
-      const imgData = canvas.toDataURL('image/png', 1.0);
-      pdf.addImage(imgData, 'PNG', offX, offY, imgWidthMM, imgHeightMM);
+
+      const actualPageW = pdf.internal.pageSize.getWidth();
+      const actualPageH = pdf.internal.pageSize.getHeight();
+      const fitScale = Math.min(
+        1,
+        (actualPageW - marginMM * 2) / svgWidthMM,
+        (actualPageH - marginMM * 2) / svgHeightMM
+      );
+      const drawW = svgWidthMM * fitScale;
+      const drawH = svgHeightMM * fitScale;
+      const offX = (actualPageW - drawW) / 2;
+      const offY = (actualPageH - drawH) / 2;
+
+      const svgDoc = new DOMParser().parseFromString(svgString, 'image/svg+xml');
+      const svgElement = document.importNode(svgDoc.documentElement, true);
+      const holder = document.createElement('div');
+      holder.style.cssText = 'position:fixed;left:-99999px;top:0;pointer-events:none;';
+      holder.appendChild(svgElement);
+      document.body.appendChild(holder);
+      try {
+        normalizePdfConnectors(svgElement);
+        await pdf.svg(svgElement, { x: offX, y: offY, width: drawW, height: drawH });
+      } finally {
+        holder.remove();
+      }
       pdf.save('diagram.pdf');
-      showToast('PDF exported — print-ready quality');
+      showToast('PDF exported — SVG embedded at vector quality');
     }
   } catch (err) {
     console.error('Export error:', err);
