@@ -31,7 +31,9 @@ A browser-based flowchart builder powered by [Mermaid](https://mermaid.js.org/).
 - **Diagram Theme** — 10 themes grouped by tone:
   - Light: Default, Neutral, Ocean, Rose, Sage
   - Dark: Dark, Forest, Midnight, Slate, Mocha
-- **Flow Direction** — TD (top-down), LR (left-right), BT (bottom-top), RL (right-left)
+- The selected palette controls the interface, preview, and opaque SVG/PNG/PDF background; it is saved for the next visit
+- On the first visit, InFlow follows the operating system's light or dark preference
+- **Flow Direction** — automatically detects `TD`/`TB`, `LR`, `BT`, or `RL` declarations and shows their full names
 - **Custom CSS** — inject arbitrary SVG styles into the rendered diagram
 - Custom CSS applies as it is entered; selecting a theme afterward reasserts that theme's colors while retaining non-color CSS
 
@@ -59,6 +61,8 @@ Open `index.html` directly in any modern browser — no build step, no server ne
 ```
 open index.html
 ```
+
+The app is intentionally split into `index.html`, `styles.css`, and `app.js` so its structure, design system, and rendering behavior can evolve independently.
 
 Run the export/theme regression checks with:
 
